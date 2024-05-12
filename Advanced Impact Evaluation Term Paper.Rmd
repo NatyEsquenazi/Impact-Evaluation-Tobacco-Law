@@ -1,0 +1,311 @@
+---
+title: "Advanced Impact Evaluation Term Paper"
+author: "Natalia Esquenazi"
+date: "2024-03-25"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Import libraries and dataset
+```{r import, echo=TRUE, message=FALSE, warning=FALSE}
+
+setwd("~/Advanced Impact Evaluation")
+
+library(tidyverse)
+library(dplyr)
+library(readr)
+library(estimatr)
+library(ggplot2)
+library(hrbrthemes)
+library(texreg)
+library(MatchIt)
+library(Matching)
+library(cobalt)
+
+df = read_csv("ENFR_baseusuario.csv")
+```
+
+## Data Transformation
+```{r transformation, echo=TRUE, message=FALSE, warning=FALSE}
+# Marriage 
+df <- df %>%
+  mutate(marital_status = case_when(marital_status == 1 ~ "single",
+                                    marital_status == 2 ~ "married",
+                                    marital_status == 3 ~ "single",
+                                    marital_status == 4 ~ "divorced",
+                                    marital_status == 5 ~ "widow",
+                                    marital_status == 6 ~ "single"))
+
+# employment 
+df <- df %>%
+  mutate(employment = case_when(employment == 1 ~ "employed",
+                                employment == 2 ~ "unemployed",
+                                employment == 3 ~ "inactive"))
+
+# education levels 
+df <- df %>%
+  mutate(education = case_when(education == 1 ~ "no education",
+                               education == 2 ~ "primary incomplete",
+                               education == 3 ~ "primary complete",
+                               education == 4 ~ "secondary incomplete",
+                               education == 5 ~ "secondary complete",
+                               education == 6 ~ "university incomplete",
+                               education == 7 ~ "university complete",
+                               education == 8 ~ "special education"))
+
+# gender 
+df <- df %>%
+  mutate(gender = case_when(gender == 1 ~ "male",
+                            gender == 2 ~ "female"))
+
+# Age range
+df <- df %>% 
+  mutate(age_range = case_when(age >= 18 & age <= 24 ~ "18-24",
+                               age >= 25 & age <= 34 ~ "25-34",
+                               age >= 35 & age <= 49 ~ "35-49",
+                               age >= 50 & age <= 64 ~ "50-64",
+                               age >= 65 ~ "65+"))
+
+
+# Transform variables class
+df$employment <- as.factor(df$employment)
+df$education <- as.factor(df$education)
+df$tobacco_consumption <- as.numeric(df$tobacco_consumption)
+df$income_quintile <- as.numeric(df$income_quintile)
+df$year <- as.factor(df$year)
+df$state <- as.factor(df$state)
+df$region <- as.factor(df$region)
+df$gender <- as.factor(df$gender)
+df$age_range <- as.factor(df$age_range)
+
+summary(df)
+```
+
+## Outcome variable 
+```{r outcome, echo=TRUE, message=FALSE, warning=FALSE}
+# Outcome variable 
+df %>%
+    ggplot( aes(x=tobacco_consumption)) +
+    geom_histogram( binwidth=8, fill="#69b3a2", color="#e9ecef", alpha=0.9, ) +
+    ggtitle("Graph 1: Tobacco Consumption") +
+    theme_ipsum() +
+    theme(
+      plot.title = element_text(size=15)
+    ) +
+  facet_wrap( ~ state + year)
+
+df %>%
+  group_by(state, year)%>%
+  summarise(avg = mean(tobacco_consumption))
+```
+
+## Youth population and tobacco consumption analysis
+
+## Treatment column 
+```{r treat youth, echo=TRUE, message=FALSE, warning=FALSE}
+df_young <- df %>%
+  filter(age_range == "18-24") %>% 
+  mutate(treat = case_when(state == "Cordoba" ~ "treat",
+                           state == "Buenos Aires" ~ "control"))
+
+# treatment variable 
+df_young %>%
+    ggplot( aes(x=tobacco_consumption)) +
+    geom_histogram( binwidth=8, fill="#69b3a2", color="#e9ecef", alpha=0.9, ) +
+    ggtitle("Graph 2: Youth population tobacco consumption") +
+    theme_ipsum() +
+    theme(
+      plot.title = element_text(size=15)
+    ) +
+  facet_wrap( ~ state + year)
+
+df_young %>%
+  group_by(state, year)%>%
+  summarise(avg = mean(tobacco_consumption))
+```
+
+## Matching 
+```{r matching young, echo=TRUE, message=FALSE, warning=FALSE}
+# coarsened exact matching:
+df_young <- df_young %>%
+  filter(!is.na(weight)) %>%
+  filter(!is.na(income_quintile)) 
+
+match1 <- matchit(treat ~ income_quintile + gender + education + employment + weight, 
+                  data = df_young, method = "cem",
+                  replace = FALSE)
+summary(match1)
+match1 
+
+love1 <- love.plot(match1, stars ="std", 
+                   stats = c("mean.diffs"), 
+                   binary = "std", abs = FALSE, grid = TRUE)
+love1
+```
+
+## Multiple regression
+```{r reg youth, echo=TRUE, message=FALSE, warning=FALSE}
+# create dataset
+match_dat1 <- match.data(match1)
+
+mod1 <- lm_robust(tobacco_consumption ~ treat, data = match_dat1)
+
+mod2 <- lm_robust(tobacco_consumption ~ treat + year + income_quintile + employment, data = match_dat1)
+
+mod3 <- lm_robust(tobacco_consumption ~ treat + year + income_quintile + employment + gender + education + weight, data = match_dat1)
+
+screenreg(list(mod1, mod2, mod3))
+```
+
+## Difference in differences
+```{r dif youth, echo=TRUE, message=FALSE, warning=FALSE}
+# parallel trends
+tab1 <- match_dat1 %>%
+  group_by(year, treat) %>%
+  summarise(avg_consumption = mean(tobacco_consumption))
+
+ggplot(tab1, aes(x=year, y=avg_consumption, group = treat, colour = treat)) + 
+  geom_line()  + 
+  geom_point( size=2, shape=21, fill="white") + 
+  theme_minimal() +
+  labs(title = "Youth tobacco consumption by treatment",
+       y = "Average Consumption",
+       x = "Year")
+```
+
+```{r dif youth2, echo=TRUE, message=FALSE, warning=FALSE}
+match_dat1 <- match_dat1 %>%
+  mutate(treat = case_when(treat == "control" ~ 0,
+                           treat == "treat" ~ 1),
+         time = case_when(year == "2013"~ 0,
+                          year == "2018"~ 1))
+
+match_dat1$treat <- as.numeric(match_dat1$treat)
+match_dat1$year <- as.numeric(match_dat1$year)
+
+mod4 <- lm_robust(tobacco_consumption ~ treat + time + I(treat*time), data = match_dat1)
+screenreg(mod4)
+```
+
+## Young adults and tobacco consumption analysis
+
+## Treatment column 
+```{r treat2, echo=TRUE, message=FALSE, warning=FALSE}
+df_young_adults <- df %>%
+  filter(age_range == "25-34") %>% 
+  mutate(treat = case_when(state == "Cordoba" ~ "treat",
+                           state == "Buenos Aires" ~ "control"))
+
+# treatment variable 
+df_young_adults %>%
+    ggplot( aes(x=tobacco_consumption)) +
+    geom_histogram( binwidth=8, fill="#69b3a2", color="#e9ecef", alpha=0.9, ) +
+    ggtitle("Graph 3: Young adults tobacco consumption") +
+    theme_ipsum() +
+    theme(
+      plot.title = element_text(size=15)
+    ) +
+  facet_wrap( ~ state + year)
+
+df_young_adults %>%
+  group_by(state, year)%>%
+  summarise(avg = mean(tobacco_consumption))
+```
+
+## Matching 
+```{r matching young adult, echo=TRUE, message=FALSE, warning=FALSE}
+# coarsened exact matching:
+df_young_adults <- df_young_adults %>%
+  filter(!is.na(weight))%>%
+  filter(!is.na(income_quintile))
+
+match2 <- matchit(treat ~ income_quintile + gender + education + employment + weight, 
+                  data = df_young_adults, method = "cem",
+                  replace = FALSE)
+summary(match2)
+
+love2 <- love.plot(match2, stars ="std", 
+                   stats = c("mean.diffs"), 
+                   binary = "std", abs = FALSE, grid = TRUE)
+love2
+```
+
+## Multiple regression
+```{r reg young adult, echo=TRUE, message=FALSE, warning=FALSE}
+# create dataset
+match_dat2 <- match.data(match2)
+
+mod5 <- lm_robust(tobacco_consumption ~ treat, data = match_dat2)
+
+mod6 <- lm_robust(tobacco_consumption ~ treat + year + income_quintile + employment, data = match_dat2)
+
+mod7 <- lm_robust(tobacco_consumption ~ treat + year + income_quintile + employment + gender + education + weight, data = match_dat2)
+
+screenreg(list(mod5, mod6, mod7))
+```
+
+## Difference in differences
+```{r dif young adult, echo=TRUE, message=FALSE, warning=FALSE}
+# parallel trends
+tab2 <- match_dat2 %>%
+  group_by(year, treat) %>%
+  summarise(avg_consumption = mean(tobacco_consumption))
+
+ggplot(tab2, aes(x=year, y=avg_consumption, group = treat, colour = treat)) + 
+  geom_line()  + 
+  geom_point( size=2, shape=21, fill="white") + 
+  theme_minimal() +
+  labs(title = "Young adults tobacco consumption by treatment",
+       y = "Average Consumption",
+       x = "Year")
+```
+
+```{r dif young adult2, echo=TRUE, message=FALSE, warning=FALSE}
+match_dat2 <- match_dat2 %>%
+  mutate(treat = case_when(treat == "control" ~ 0,
+                           treat == "treat" ~ 1),
+         time = case_when(year == "2013"~ 0,
+                          year == "2018"~ 1))
+
+match_dat2$treat <- as.numeric(match_dat2$treat)
+match_dat2$year <- as.numeric(match_dat2$year)
+
+mod8 <- lm_robust(tobacco_consumption ~ treat + time + I(treat*time), data = match_dat2)
+screenreg(mod8)
+```
+
+## Panel data for young adults
+```{r panel data, echo=TRUE, message=FALSE, warning=FALSE}
+library(fixest)
+
+mod9 <- feols(tobacco_consumption ~ treat | year, data = match_dat2)
+summary(mod9)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
